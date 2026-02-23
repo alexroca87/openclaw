@@ -1,0 +1,70 @@
+{
+  "id": "model-router",
+  "name": "Model Router",
+  "description": "Routes messages to the cheapest capable model based on complexity classification",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "simpleModel": {
+        "type": "string",
+        "description": "Model ID for simple/FAQ messages (default: google/gemini-2.0-flash-exp)"
+      },
+      "complexModel": {
+        "type": "string",
+        "description": "Model ID for code/analysis messages (default: anthropic/claude-haiku-4-5)"
+      },
+      "hardModel": {
+        "type": "string",
+        "description": "Model ID for detailed analysis/essays (default: anthropic/claude-sonnet-4)"
+      },
+      "backgroundModel": {
+        "type": "string",
+        "description": "Model ID for summaries/digests (default: deepseek/deepseek-chat)"
+      },
+      "provider": {
+        "type": "string",
+        "description": "Provider to route through (default: openrouter)"
+      },
+      "complexWordThreshold": {
+        "type": "number",
+        "description": "Word count above which unclassified messages go to complex tier (default: 100)",
+        "minimum": 10,
+        "maximum": 500
+      },
+      "hardWordThreshold": {
+        "type": "number",
+        "description": "Minimum word count for hard classification (must also match patterns, default: 50)",
+        "minimum": 10,
+        "maximum": 500
+      }
+    }
+  },
+  "uiHints": {
+    "simpleModel": {
+      "label": "Simple Model",
+      "placeholder": "google/gemini-2.0-flash-exp",
+      "help": "Cheapest model for greetings, FAQs, short answers (~80% of messages)"
+    },
+    "complexModel": {
+      "label": "Complex Model",
+      "placeholder": "anthropic/claude-haiku-4-5",
+      "help": "Mid-tier model for code, analysis, reasoning (~15% of messages)"
+    },
+    "hardModel": {
+      "label": "Hard Model",
+      "placeholder": "anthropic/claude-sonnet-4",
+      "help": "Premium model for detailed analysis, essays (~5% of messages)"
+    },
+    "backgroundModel": {
+      "label": "Background Model",
+      "placeholder": "deepseek/deepseek-chat",
+      "help": "Budget model for summaries, digests, recaps"
+    },
+    "provider": {
+      "label": "Provider",
+      "placeholder": "openrouter",
+      "help": "LLM provider to route all models through"
+    }
+  }
+}
