@@ -109,11 +109,15 @@ services:
       context: /opt/openclaw
     container_name: agent-client-1
     restart: unless-stopped
+    user: root
+    entrypoint: ["/opt/entrypoint.sh"]
     command: ["node", "openclaw.mjs", "gateway", "--allow-unconfigured", "--bind", "lan"]
     ports:
       - "3001:18789"
     volumes:
       - ./data/client-1:/data
+      - ./data/client-1/workspace:/home/node/.openclaw/workspace
+      - ./entrypoint.sh:/opt/entrypoint.sh:ro
     environment:
       - OPENCLAW_STATE_DIR=/data/.openclaw
       - OPENCLAW_WORKSPACE_DIR=/data/workspace
@@ -130,6 +134,8 @@ Key details:
 - **Port 18789** is OpenClaw's gateway port (NOT 3000)
 - **`--bind lan`** is required for non-loopback access
 - **`--allow-unconfigured`** lets the gateway start without full onboarding
+- **`user: root` + `entrypoint`** — runs `entrypoint.sh` as root to auto-install CLI tools (gog, summarize), then drops to `node` user via `runuser`
+- **Workspace volume mount** — `./data/client-1/workspace:/home/node/.openclaw/workspace` ensures workspace files (IDENTITY.md, SOUL.md, memory, etc.) persist across container recreations
 - **OPENROUTER_API_KEY** — used for all chat/reasoning models
 - **OPENAI_API_KEY** — used ONLY for Whisper transcription and embeddings (memory search)
 
@@ -285,21 +291,21 @@ Look for: `[telegram] [default] starting provider (@YourBot_bot)`
 docker exec agent-client-1 node /app/openclaw.mjs pairing approve telegram PAIRING_CODE
 ```
 
-### Step 10: Install CLI Tools for Skills
+### Step 10: CLI Tools for Skills (Auto-Installed)
 
-Skills are bundled instructions. The CLI tools they depend on must be installed separately inside the container:
+The `entrypoint.sh` script automatically installs CLI tools on container start:
+- **gog** — Google Workspace (Gmail, Calendar, Drive, Contacts, Sheets, Docs)
+- **summarize** — Summarize URLs, YouTube videos, podcasts
+
+These survive container restarts automatically. No manual installation needed.
+
+To add more CLI tools to auto-install, edit `/opt/agents/entrypoint.sh` on the server.
+
+Manual install (if needed for debugging):
 
 ```bash
-# Google Workspace (Gmail, Calendar, Drive, Contacts, Sheets, Docs)
-docker exec -u root agent-client-1 npm install -g gog
-
-# Summarize (URLs, YouTube, podcasts)
-docker exec -u root agent-client-1 npm install -g summarize
+docker exec -u root agent-client-1 npm install -g gog summarize
 ```
-
-Must use `-u root` because the container runs as `node` user which can't write to global npm.
-
-Important: These installs are **lost when the container is recreated** (`docker compose up -d` after changing docker-compose.yml). You need to reinstall them. Consider adding them to a custom Dockerfile or a startup script.
 
 ### Step 11: Install ClawHub Skills
 
@@ -368,17 +374,37 @@ Fresh OpenClaw defaults to `anthropic/claude-opus-4-6` which requires a direct A
 ### HTTPS Requirement
 The Control UI requires a "secure context" (HTTPS or localhost) for device identity via Web Crypto API. Plain HTTP to a remote IP will show "control ui requires device identity" and block pairing. Solutions: Caddy reverse proxy (production) or SSH tunnel (debugging).
 
-### Container Recreates
-`docker compose up -d` (after changing docker-compose.yml) **recreates** the container, which loses globally installed npm packages (gog, summarize). The `/data` volume persists (configs, memory, auth), but CLI tools must be reinstalled. This is the only manual step after a recreate.
+### Container Recreates (SOLVED)
+`docker compose up -d` (after changing docker-compose.yml) **recreates** the container. Previously this lost globally installed npm packages (gog, summarize). Now solved with two mechanisms:
+- **`entrypoint.sh`** — auto-installs CLI tools on every container start (gog, summarize)
+- **Workspace volume mount** — `./data/AGENT/workspace:/home/node/.openclaw/workspace` persists workspace files (IDENTITY.md, SOUL.md, memory, etc.)
+
+The `/data` volume persists configs, auth, and memory. Nothing is lost on recreate.
 
 ### Config Key Names
 Telegram token config path is `channels.telegram.accounts.default.botToken` — not `telegram.bots.0.token`, not `channels.telegram.token`, not `channels.telegram.accounts.default.token`. All of those fail validation.
 
 ### Permissions
-Docker creates host volumes as root, but OpenClaw runs as `node` (uid 1000). Fix with `chmod -R 777` on the data directory, or use `-u root` for exec commands that write files.
+The container runs as `user: root` (for entrypoint to install tools), then drops to `node` user via `runuser`. Data directories should still be `chmod -R 777` for safety.
 
-### Memory Directory
-The memory directory must be created at `/home/node/.openclaw/workspace/memory` (inside container), not at the volume-mounted `/data/workspace/memory`. The agent resolves workspace from `~/.openclaw/workspace`.
+### Auth Profiles Format
+The `auth-profiles.json` must use the AuthProfileStore format:
+```json
+{
+  "version": 1,
+  "profiles": {
+    "anthropic-default": {
+      "type": "api_key",
+      "provider": "anthropic",
+      "key": "sk-ant-..."
+    }
+  }
+}
+```
+NOT the simple `{ "anthropic": { "apiKey": "..." } }` format — that silently fails.
+
+### Workspace Path
+The workspace volume must mount to `/home/node/.openclaw/workspace` (where OpenClaw actually reads it), not `/data/workspace`. The `OPENCLAW_WORKSPACE_DIR` env var is for the state directory, but the agent resolves workspace from `~/.openclaw/workspace`.
 
 ---
 
@@ -483,9 +509,15 @@ Client Browser / Telegram / WhatsApp
 
 ---
 
-## Future Automation TODOs
+## Automation Status
 
-- [ ] Add gog + summarize install to Dockerfile (or entrypoint script) to survive container recreates
+### Done
+- [x] `entrypoint.sh` auto-installs gog + summarize on container start (survives recreates)
+- [x] Workspace volume mount persists agent identity + memory across recreates
+- [x] `add-agent.sh` script handles full agent provisioning in one command
+- [x] Correct AuthProfileStore format in auth-profiles.json
+
+### TODO
 - [ ] Automate Google OAuth setup flow for clients
 - [ ] Create `remove-agent.sh` script (reverse of add-agent.sh)
 - [ ] Add monitoring/alerting for agent health

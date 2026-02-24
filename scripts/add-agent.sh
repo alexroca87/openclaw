@@ -2,31 +2,38 @@
 # ---------------------------------------------------------------
 # add-agent.sh — Add a new OpenClaw agent to Hetzner VPS
 #
-# Usage: ./add-agent.sh <agent-name> <domain> <openrouter-api-key>
-# Example: ./add-agent.sh agentalfa agentik.mx sk-or-v1-abc123...
+# Usage: ./add-agent.sh <agent-name> <domain> <openrouter-api-key> [openai-api-key] [anthropic-api-key]
+# Example: ./add-agent.sh agentalfa agentik.mx sk-or-v1-abc123... sk-proj-xyz... sk-ant-api03-...
 #
 # What it does:
 #   1. Generates a gateway token
 #   2. Creates data directories with correct permissions
 #   3. Writes openclaw.json (allowedOrigins, auth token)
-#   4. Writes auth-profiles.json (OpenRouter API key)
-#   5. Sets default model to openrouter/auto
-#   6. Adds service to docker-compose.yml
-#   7. Adds Caddy reverse proxy entry
-#   8. Starts the container + reloads Caddy
+#   4. Writes auth-profiles.json (AuthProfileStore format)
+#   5. Sets default model to anthropic/claude-haiku-4-5
+#   6. Copies entrypoint.sh (auto-installs CLI tools on start)
+#   7. Adds service to docker-compose.yml (with workspace mount)
+#   8. Adds Caddy reverse proxy entry
+#   9. Starts the container + reloads Caddy
 # ---------------------------------------------------------------
 
 set -euo pipefail
 
 if [[ $# -lt 3 ]]; then
-  echo "Usage: $0 <agent-name> <domain> <openrouter-api-key>"
-  echo "Example: $0 agentalfa agentik.mx sk-or-v1-abc123..."
+  echo "Usage: $0 <agent-name> <domain> <openrouter-api-key> [openai-api-key] [anthropic-api-key]"
+  echo "Example: $0 agentalfa agentik.mx sk-or-v1-abc123... sk-proj-xyz... sk-ant-api03-..."
+  echo ""
+  echo "  openrouter-api-key  — Required. Used for chat models via OpenRouter."
+  echo "  openai-api-key      — Optional. Used for Whisper transcription + embeddings."
+  echo "  anthropic-api-key   — Optional. Used for direct Anthropic model access."
   exit 1
 fi
 
 AGENT_NAME="$1"
 DOMAIN="$2"
 OPENROUTER_KEY="$3"
+OPENAI_KEY="${4:-}"
+ANTHROPIC_KEY="${5:-}"
 AGENTS_DIR="/opt/agents"
 COMPOSE_FILE="$AGENTS_DIR/docker-compose.yml"
 CADDYFILE="/etc/caddy/Caddyfile"
@@ -36,6 +43,7 @@ CONTAINER_NAME="agent-${AGENT_NAME}"
 DATA_DIR="$AGENTS_DIR/data/${AGENT_NAME}"
 OPENCLAW_DIR="$DATA_DIR/.openclaw"
 AGENT_DIR="$OPENCLAW_DIR/agents/main/agent"
+WORKSPACE_DIR="$DATA_DIR/workspace"
 
 # --- Find next available port ---
 if [[ -f "$COMPOSE_FILE" ]]; then
@@ -64,14 +72,21 @@ echo "============================================"
 
 # --- Create data directories ---
 mkdir -p "$AGENT_DIR"
-mkdir -p "$DATA_DIR/workspace"
+mkdir -p "$WORKSPACE_DIR/memory"
+
+# --- Determine default model ---
+if [[ -n "$ANTHROPIC_KEY" ]]; then
+  DEFAULT_MODEL="anthropic/claude-haiku-4-5"
+else
+  DEFAULT_MODEL="openrouter/auto"
+fi
 
 # --- Write openclaw.json ---
 cat > "$OPENCLAW_DIR/openclaw.json" << OCEOF
 {
   "agents": {
     "defaults": {
-      "model": "openrouter/auto",
+      "model": "${DEFAULT_MODEL}",
       "compaction": {
         "mode": "safeguard"
       }
@@ -97,11 +112,32 @@ cat > "$OPENCLAW_DIR/openclaw.json" << OCEOF
 }
 OCEOF
 
-# --- Write auth-profiles.json (OpenRouter key) ---
+# --- Write auth-profiles.json (AuthProfileStore format) ---
+# Build profiles object based on which keys are provided
+PROFILES=""
+
+# OpenRouter profile (always present)
+PROFILES="\"openrouter-default\": {
+      \"type\": \"api_key\",
+      \"provider\": \"openrouter\",
+      \"key\": \"${OPENROUTER_KEY}\"
+    }"
+
+# Anthropic profile (optional)
+if [[ -n "$ANTHROPIC_KEY" ]]; then
+  PROFILES="${PROFILES},
+    \"anthropic-default\": {
+      \"type\": \"api_key\",
+      \"provider\": \"anthropic\",
+      \"key\": \"${ANTHROPIC_KEY}\"
+    }"
+fi
+
 cat > "$AGENT_DIR/auth-profiles.json" << APEOF
 {
-  "openrouter": {
-    "apiKey": "${OPENROUTER_KEY}"
+  "version": 1,
+  "profiles": {
+    ${PROFILES}
   }
 }
 APEOF
@@ -130,8 +166,22 @@ cat > "$AGENT_DIR/models.json" << MDEOF
 }
 MDEOF
 
+# --- Copy entrypoint script ---
+cp "$AGENTS_DIR/entrypoint.sh" "$AGENTS_DIR/entrypoint.sh" 2>/dev/null || true
+
 # --- Set permissions (OpenClaw runs as uid 1000 / node) ---
 chmod -R 777 "$DATA_DIR"
+chmod +x "$AGENTS_DIR/entrypoint.sh"
+
+# --- Build environment variables block ---
+ENV_BLOCK="      - OPENCLAW_STATE_DIR=/data/.openclaw
+      - OPENCLAW_WORKSPACE_DIR=/data/workspace
+      - OPENROUTER_API_KEY=${OPENROUTER_KEY}"
+
+if [[ -n "$OPENAI_KEY" ]]; then
+  ENV_BLOCK="${ENV_BLOCK}
+      - OPENAI_API_KEY=${OPENAI_KEY}"
+fi
 
 # --- Add to docker-compose.yml ---
 if [[ ! -f "$COMPOSE_FILE" ]]; then
@@ -149,15 +199,17 @@ SERVICE_BLOCK="  ${CONTAINER_NAME}:
       context: /opt/openclaw
     container_name: ${CONTAINER_NAME}
     restart: unless-stopped
+    user: root
+    entrypoint: [\"/opt/entrypoint.sh\"]
     command: [\"node\", \"openclaw.mjs\", \"gateway\", \"--allow-unconfigured\", \"--bind\", \"lan\"]
     ports:
       - \"${NEXT_PORT}:18789\"
     volumes:
       - ./data/${AGENT_NAME}:/data
+      - ./data/${AGENT_NAME}/workspace:/home/node/.openclaw/workspace
+      - ./entrypoint.sh:/opt/entrypoint.sh:ro
     environment:
-      - OPENCLAW_STATE_DIR=/data/.openclaw
-      - OPENCLAW_WORKSPACE_DIR=/data/workspace
-      - OPENROUTER_API_KEY=${OPENROUTER_KEY}
+${ENV_BLOCK}
     networks:
       - ${NETWORK_NAME}"
 
@@ -188,6 +240,10 @@ echo "============================================"
 echo ""
 echo "  URL: https://${FULL_DOMAIN}"
 echo "  Gateway Token: ${GATEWAY_TOKEN}"
+echo "  Model: ${DEFAULT_MODEL}"
+echo ""
+echo "  Skills auto-installed: gog (Google Workspace), summarize"
+echo "  Workspace: persistent (survives container recreations)"
 echo ""
 echo "  Next steps:"
 echo "  1. Add DNS A record: ${AGENT_NAME} -> $(curl -s ifconfig.me)"
@@ -196,4 +252,7 @@ echo "  3. Enter the Gateway Token and click Connect"
 echo "  4. Approve the device:"
 echo "     docker exec ${CONTAINER_NAME} node /app/openclaw.mjs devices list"
 echo "     docker exec ${CONTAINER_NAME} node /app/openclaw.mjs devices approve <requestId>"
+echo "  5. Set up Telegram (optional):"
+echo "     docker exec ${CONTAINER_NAME} node /app/openclaw.mjs config set channels.telegram.accounts.default.botToken 'BOT_TOKEN'"
+echo "     docker compose restart ${CONTAINER_NAME}"
 echo ""
