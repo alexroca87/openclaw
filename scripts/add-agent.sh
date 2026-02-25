@@ -166,8 +166,12 @@ cat > "$AGENT_DIR/models.json" << MDEOF
 }
 MDEOF
 
-# --- Copy entrypoint script ---
-cp "$AGENTS_DIR/entrypoint.sh" "$AGENTS_DIR/entrypoint.sh" 2>/dev/null || true
+# --- Ensure entrypoint script exists ---
+if [[ ! -f "$AGENTS_DIR/entrypoint.sh" ]]; then
+  echo "ERROR: entrypoint.sh not found at $AGENTS_DIR/entrypoint.sh"
+  echo "Copy it from the openclaw repo: cp /opt/openclaw/scripts/entrypoint.sh $AGENTS_DIR/"
+  exit 1
+fi
 
 # --- Set permissions (OpenClaw runs as uid 1000 / node) ---
 chmod -R 777 "$DATA_DIR"
@@ -242,7 +246,8 @@ echo "  URL: https://${FULL_DOMAIN}"
 echo "  Gateway Token: ${GATEWAY_TOKEN}"
 echo "  Model: ${DEFAULT_MODEL}"
 echo ""
-echo "  Skills auto-installed: gog (Google Workspace), summarize"
+echo "  Skills auto-installed (9): gog, summarize, ddg-search, pdf-text-extractor,"
+echo "    openai-whisper-api, openai-image-gen, weather, healthcheck, skill-creator"
 echo "  Workspace: persistent (survives container recreations)"
 echo ""
 echo "  Next steps:"

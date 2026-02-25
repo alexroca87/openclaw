@@ -227,19 +227,29 @@ Set model via CLI:
 docker exec agent-client-1 node /app/openclaw.mjs config set agents.defaults.model openrouter/auto
 ```
 
-### Step 7: OpenRouter Auth Profile
+### Step 7: Auth Profiles (AuthProfileStore format)
 
 Create `/opt/agents/data/client-1/.openclaw/agents/main/agent/auth-profiles.json`:
 
 ```json
 {
-  "openrouter": {
-    "apiKey": "sk-or-v1-your-key-here"
+  "version": 1,
+  "profiles": {
+    "openrouter-default": {
+      "type": "api_key",
+      "provider": "openrouter",
+      "key": "sk-or-v1-your-key-here"
+    },
+    "anthropic-default": {
+      "type": "api_key",
+      "provider": "anthropic",
+      "key": "sk-ant-api03-your-key-here"
+    }
   }
 }
 ```
 
-This tells the agent WHERE to send LLM requests. Without this, it defaults to direct Anthropic and fails with "No API key found for provider anthropic."
+This tells the agent WHERE to send LLM requests. Without this, it defaults to direct Anthropic and fails with "No API key found for provider anthropic." The `add-agent.sh` script creates this file automatically.
 
 ### Step 8: Control UI — Device Pairing
 
@@ -291,48 +301,44 @@ Look for: `[telegram] [default] starting provider (@YourBot_bot)`
 docker exec agent-client-1 node /app/openclaw.mjs pairing approve telegram PAIRING_CODE
 ```
 
-### Step 10: CLI Tools for Skills (Auto-Installed)
+### Step 10: Skills (All Auto-Installed)
 
-The `entrypoint.sh` script automatically installs CLI tools on container start:
-- **gog** — Google Workspace (Gmail, Calendar, Drive, Contacts, Sheets, Docs)
-- **summarize** — Summarize URLs, YouTube videos, podcasts
+The `entrypoint.sh` script automatically installs all baseline skills on every container start. **No manual installation needed.** This includes both npm CLI tools and ClawHub community skills.
 
-These survive container restarts automatically. No manual installation needed.
-
-To add more CLI tools to auto-install, edit `/opt/agents/entrypoint.sh` on the server.
-
-Manual install (if needed for debugging):
-
-```bash
-docker exec -u root agent-client-1 npm install -g gog summarize
-```
-
-### Step 11: Install ClawHub Skills
-
-For skills from the community registry:
-
-```bash
-docker exec agent-client-1 npx clawhub install ddg-web-search
-```
-
-### Step 12: Verify All Skills
+Verify all skills are ready:
 
 ```bash
 docker exec agent-client-1 node /app/openclaw.mjs skills check
 ```
 
-Current ready skills after full setup:
+**9 skills auto-installed on every start:**
 
-| Skill | Purpose | Dependency |
-|-------|---------|------------|
-| **gog** | Google Workspace (Gmail, Calendar, Drive, etc.) | `gog` CLI + Google OAuth |
-| **openai-whisper-api** | Voice note transcription | `OPENAI_API_KEY` env var |
-| **openai-image-gen** | Image generation | `OPENAI_API_KEY` env var |
-| **ddg-search** | Web search (DuckDuckGo) | ClawHub package |
-| **summarize** | Summarize URLs/YouTube/podcasts | `summarize` CLI |
-| **weather** | Weather forecasts | None (uses wttr.in) |
-| **healthcheck** | Server security checks | None |
-| **skill-creator** | Create custom skills | None |
+| Skill | Type | Purpose | Dependency |
+|-------|------|---------|------------|
+| **gog** | npm | Google Workspace (Gmail, Calendar, Drive, Sheets, Docs) | `gog` CLI + Google OAuth |
+| **summarize** | npm | Summarize URLs, YouTube videos, podcasts | `summarize` CLI |
+| **ddg-search** | ClawHub | DuckDuckGo web search (free) | `ddg-web-search` package |
+| **pdf-text-extractor** | ClawHub | Extract text from PDFs with OCR | `pdf-text-extractor` package |
+| **openai-whisper-api** | built-in | Voice note transcription | `OPENAI_API_KEY` env var |
+| **openai-image-gen** | built-in | Image generation | `OPENAI_API_KEY` env var |
+| **weather** | built-in | Weather forecasts | None (uses wttr.in) |
+| **healthcheck** | built-in | Server security checks | None |
+| **skill-creator** | built-in | Create custom skills | None |
+
+To add more skills to auto-install, edit `/opt/agents/entrypoint.sh` on the server.
+
+**Agent self-install:** The agent can also install additional packages on its own via `npm install -g` or `npx clawhub install`. npm packages persist on the `/data/npm-global/` volume. ClawHub skills persist until container recreation (then re-installed by entrypoint).
+
+Manual install (if needed for debugging):
+
+```bash
+# npm packages
+docker exec -u root agent-client-1 npm install -g gog summarize
+
+# ClawHub skills
+docker exec agent-client-1 npx clawhub install <skill-name>
+docker exec agent-client-1 npx clawhub install <skill-name> --force  # if flagged as suspicious
+```
 
 ### Step 13: Memory System Setup
 
