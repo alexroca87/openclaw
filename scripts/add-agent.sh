@@ -73,6 +73,14 @@ echo "============================================"
 # --- Create data directories ---
 mkdir -p "$AGENT_DIR"
 mkdir -p "$WORKSPACE_DIR/memory"
+mkdir -p "$WORKSPACE_DIR/uploads"
+
+# --- Copy workspace templates (TOOLS.md, AGENTS addendum) ---
+TEMPLATES_DIR="/opt/openclaw/scripts/workspace-templates"
+if [[ -f "$TEMPLATES_DIR/TOOLS.md" ]]; then
+  cp "$TEMPLATES_DIR/TOOLS.md" "$WORKSPACE_DIR/TOOLS.md"
+  echo "  Copied TOOLS.md template to workspace"
+fi
 
 # --- Determine default model ---
 if [[ -n "$ANTHROPIC_KEY" ]]; then
@@ -106,6 +114,10 @@ cat > "$OPENCLAW_DIR/openclaw.json" << OCEOF
     },
     "auth": {
       "mode": "token",
+      "token": "${GATEWAY_TOKEN}"
+    },
+    "remote": {
+      "url": "ws://127.0.0.1:18789",
       "token": "${GATEWAY_TOKEN}"
     }
   }
@@ -236,6 +248,20 @@ CEOF
 cd "$AGENTS_DIR"
 docker compose up -d --build "$CONTAINER_NAME"
 systemctl reload caddy
+
+# --- Wait for OpenClaw to initialize workspace, then append AGENTS addendum ---
+echo "  Waiting for workspace initialization..."
+sleep 5
+if [[ -f "$TEMPLATES_DIR/AGENTS-addendum.md" ]]; then
+  if [[ -f "$WORKSPACE_DIR/AGENTS.md" ]]; then
+    cat "$TEMPLATES_DIR/AGENTS-addendum.md" >> "$WORKSPACE_DIR/AGENTS.md"
+    echo "  Appended native tools instructions to AGENTS.md"
+  else
+    # If AGENTS.md wasn't created yet, copy the addendum as standalone
+    cp "$TEMPLATES_DIR/AGENTS-addendum.md" "$WORKSPACE_DIR/AGENTS-addendum.md"
+    echo "  Created AGENTS-addendum.md (will be merged on first session)"
+  fi
+fi
 
 echo ""
 echo "============================================"
