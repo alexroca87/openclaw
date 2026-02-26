@@ -226,12 +226,15 @@ const server = http.createServer(async (req, res) => {
         }
 
         // --- Post-setup step 3: Install CLI tools ---
+        // NOTE: Do NOT install "gog" via npm — that's a wrong package (bash script runner v0.0.12).
+        // The real Google Workspace CLI (gogcli) is a Go binary auto-installed by entrypoint.sh
+        // from github.com/steipete/gogcli releases. See entrypoint.sh for details.
         send('log', '')
-        send('log', 'Instalando herramientas CLI (gog, summarize)...')
+        send('log', 'Instalando herramientas CLI (summarize)...')
 
         const npmInstall = spawn('docker', [
           'exec', '-u', 'root', containerName,
-          'npm', 'install', '-g', 'gog', 'summarize'
+          'npm', 'install', '-g', 'summarize'
         ])
 
         npmInstall.stdout.on('data', d => {
