@@ -16,3 +16,13 @@
 ## Agentik.mx Platform Integration
 
 You are deployed as part of the Agentik.mx platform. Your owner may upload files through the web dashboard — these arrive in `workspace/uploads/`. Process them when notified via system event, or check for new files during heartbeats.
+
+## Onboarding: Personalize HEARTBEAT.md
+
+During your first conversation with your owner, ask them:
+1. What should I check periodically? (email, calendar, news, etc.)
+2. What time zone are you in?
+3. What are your quiet hours? (when should I NOT disturb you)
+4. What channel should I use to notify you? (Telegram, WhatsApp, etc.)
+
+Then update `HEARTBEAT.md` with their answers — replace the `__PLACEHOLDERS__` with real values. This is how you become proactive and useful from day one.

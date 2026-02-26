@@ -75,11 +75,15 @@ mkdir -p "$AGENT_DIR"
 mkdir -p "$WORKSPACE_DIR/memory"
 mkdir -p "$WORKSPACE_DIR/uploads"
 
-# --- Copy workspace templates (TOOLS.md, AGENTS addendum) ---
+# --- Copy workspace templates (TOOLS.md, HEARTBEAT.md, AGENTS addendum) ---
 TEMPLATES_DIR="/opt/openclaw/scripts/workspace-templates"
 if [[ -f "$TEMPLATES_DIR/TOOLS.md" ]]; then
   cp "$TEMPLATES_DIR/TOOLS.md" "$WORKSPACE_DIR/TOOLS.md"
   echo "  Copied TOOLS.md template to workspace"
+fi
+if [[ -f "$TEMPLATES_DIR/HEARTBEAT.md" ]]; then
+  cp "$TEMPLATES_DIR/HEARTBEAT.md" "$WORKSPACE_DIR/HEARTBEAT.md"
+  echo "  Copied HEARTBEAT.md template to workspace"
 fi
 
 # --- Determine default model ---
