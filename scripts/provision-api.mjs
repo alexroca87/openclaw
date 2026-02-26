@@ -385,6 +385,156 @@ const server = http.createServer(async (req, res) => {
     return
   }
 
+  // =====================================================================
+  // POST /update-env — Update a credential on a running agent
+  //
+  // Body: { agentUrl, field, value }
+  //   field: "anthropic_api_key" | "brave_api_key"
+  //
+  // anthropic_api_key → update auth-profiles.json + restart container
+  // brave_api_key     → update BRAVE_API_KEY in docker-compose.yml + restart
+  // =====================================================================
+  if (req.method === 'POST' && req.url === '/update-env') {
+    let body = ''
+    req.on('data', chunk => body += chunk)
+    req.on('end', () => {
+      let agentUrl, field, value
+
+      try {
+        const parsed = JSON.parse(body)
+        agentUrl = parsed.agentUrl?.trim()
+        field = parsed.field?.trim()
+        value = parsed.value?.trim()
+      } catch {
+        res.writeHead(400, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'Invalid JSON' }))
+        return
+      }
+
+      if (!agentUrl || !field || !value) {
+        res.writeHead(400, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'agentUrl, field, and value are required' }))
+        return
+      }
+
+      // Extract agent name from URL: https://mari.agentik.mx → mari
+      const urlMatch = agentUrl.match(/^https?:\/\/([^.]+)\./)
+      if (!urlMatch) {
+        res.writeHead(400, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'Could not parse agent name from agentUrl' }))
+        return
+      }
+      const agentName = urlMatch[1]
+      const containerName = `agent-${agentName}`
+      const composeFile = `${AGENTS_DIR}/docker-compose.yml`
+
+      // Validate field
+      const allowedFields = ['anthropic_api_key', 'brave_api_key']
+      if (!allowedFields.includes(field)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: `field must be one of: ${allowedFields.join(', ')}` }))
+        return
+      }
+
+      // Verify agent data dir exists
+      const dataDir = `${AGENTS_DIR}/data/${agentName}`
+      if (!existsSync(dataDir)) {
+        res.writeHead(404, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: `Agent '${agentName}' not found` }))
+        return
+      }
+
+      try {
+        if (field === 'anthropic_api_key') {
+          // Update auth-profiles.json
+          const profilesPath = `${dataDir}/.openclaw/agents/main/agent/auth-profiles.json`
+          let profiles
+          if (existsSync(profilesPath)) {
+            profiles = JSON.parse(readFileSync(profilesPath, 'utf8'))
+          } else {
+            profiles = { version: 1, profiles: {} }
+          }
+
+          profiles.profiles['anthropic-default'] = {
+            type: 'api_key',
+            provider: 'anthropic',
+            key: value,
+          }
+
+          writeFileSync(profilesPath, JSON.stringify(profiles, null, 2), 'utf8')
+          console.log(`[update-env] Updated anthropic key for ${agentName}`)
+
+        } else if (field === 'brave_api_key') {
+          // Update BRAVE_API_KEY in docker-compose.yml (multi-agent safe)
+          const lines = readFileSync(composeFile, 'utf8').split('\n')
+          let inTargetService = false
+          let inEnvironment = false
+          let replaced = false
+          let lastEnvLineIdx = -1
+
+          for (let i = 0; i < lines.length; i++) {
+            const line = lines[i]
+            // Detect entering our target service
+            if (line.match(new RegExp(`^  ${containerName}:`))) {
+              inTargetService = true
+              continue
+            }
+            // Detect leaving service (next service or networks: at root level)
+            if (inTargetService && /^  \S/.test(line) && !line.startsWith(`  ${containerName}`)) {
+              inTargetService = false
+              inEnvironment = false
+            }
+            if (inTargetService && line.includes('environment:')) {
+              inEnvironment = true
+              continue
+            }
+            // Detect leaving environment section (next non-env key)
+            if (inTargetService && inEnvironment && /^\s{4}\w/.test(line) && !line.includes('- ')) {
+              inEnvironment = false
+            }
+            if (inTargetService && inEnvironment && line.includes('- ')) {
+              lastEnvLineIdx = i
+              if (line.includes('BRAVE_API_KEY=')) {
+                lines[i] = `      - BRAVE_API_KEY=${value}`
+                replaced = true
+              }
+            }
+          }
+
+          // If not replaced, insert after last env var in this service
+          if (!replaced && lastEnvLineIdx >= 0) {
+            lines.splice(lastEnvLineIdx + 1, 0, `      - BRAVE_API_KEY=${value}`)
+          }
+
+          writeFileSync(composeFile, lines.join('\n'), 'utf8')
+          console.log(`[update-env] Updated BRAVE_API_KEY in compose for ${agentName}`)
+        }
+
+        // Restart container to pick up changes
+        const restart = spawn('docker', [
+          'compose', '-f', composeFile, 'up', '-d', containerName
+        ], { cwd: AGENTS_DIR })
+
+        restart.on('close', (code) => {
+          if (code !== 0) {
+            res.writeHead(500, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ error: `Container restart failed with code ${code}` }))
+            return
+          }
+
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ ok: true, field, agentName, restarted: true }))
+        })
+
+      } catch (e) {
+        console.error(`[update-env] Error:`, e.message)
+        res.writeHead(500, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: e.message }))
+      }
+    })
+    return
+  }
+
   res.writeHead(404)
   res.end()
 })
