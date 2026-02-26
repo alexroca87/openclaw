@@ -422,14 +422,10 @@ export async function resolveMedia(
         logVerbose(`telegram: getFile retry ${attempt}/${maxAttempts}`),
     });
   } catch (err) {
-    // Handle "file is too big" separately - Telegram Bot API has a 20MB download limit
+    // Handle "file is too big" — Telegram Bot API has a 20MB download limit.
+    // Throw so the caller can show a user-visible error instead of silently dropping the media.
     if (isFileTooBigError(err)) {
-      logVerbose(
-        warn(
-          "telegram: getFile failed - file exceeds Telegram Bot API 20MB limit; skipping attachment",
-        ),
-      );
-      return null;
+      throw new Error("File exceeds 20MB limit (Telegram Bot API maximum)");
     }
     // All retries exhausted — return null so the message still reaches the agent
     // with a type-based placeholder (e.g. <media:audio>) instead of being dropped.

@@ -714,7 +714,7 @@ export const registerTelegramHandlers = ({
             operation: "sendMessage",
             runtime,
             fn: () =>
-              bot.api.sendMessage(chatId, `⚠️ File too large. Maximum size is ${limitMb}MB.`, {
+              bot.api.sendMessage(chatId, `⚠️ File too large. Maximum size is ${limitMb}MB (approximately 15 minutes of audio).`, {
                 reply_to_message_id: msg.message_id,
               }),
           }).catch(() => {});
