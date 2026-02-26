@@ -56,14 +56,20 @@ Estas herramientas hablan directamente con el gateway via WebSocket. Usalas dire
 
 ## Skills que puedes instalar tu mismo
 
-Puedes buscar e instalar mas skills desde ClawHub:
+Tu directorio de skills (/app/skills/) esta montado en un volumen persistente. Cualquier skill que instales **sobrevive reinicios y recreaciones del contenedor**. Instala lo que necesites con confianza.
+
 ```
 # Buscar skills disponibles
 npx clawhub search <query>
 
-# Instalar una skill
+# Instalar una skill (persistente)
 npx clawhub install <skill-name>
+
+# Listar skills instaladas
+npx clawhub list
 ```
+
+Hay 53 skills disponibles en el catalogo de OpenClaw. Explora e instala las que tu owner necesite.
 
 ## Setup Especifico
 

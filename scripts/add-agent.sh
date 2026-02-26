@@ -74,6 +74,7 @@ echo "============================================"
 mkdir -p "$AGENT_DIR"
 mkdir -p "$WORKSPACE_DIR/memory"
 mkdir -p "$WORKSPACE_DIR/uploads"
+mkdir -p "$DATA_DIR/skills"
 
 # --- Copy workspace templates (TOOLS.md, HEARTBEAT.md, AGENTS addendum) ---
 TEMPLATES_DIR="/opt/openclaw/scripts/workspace-templates"
@@ -227,6 +228,7 @@ SERVICE_BLOCK="  ${CONTAINER_NAME}:
     volumes:
       - ./data/${AGENT_NAME}:/data
       - ./data/${AGENT_NAME}/workspace:/home/node/.openclaw/workspace
+      - ./data/${AGENT_NAME}/skills:/app/skills
       - ./entrypoint.sh:/opt/entrypoint.sh:ro
     environment:
 ${ENV_BLOCK}
@@ -248,9 +250,25 @@ ${FULL_DOMAIN} {
 }
 CEOF
 
-# --- Start container + reload Caddy ---
+# --- Copy bundled skills to persistent volume (first-time only) ---
+# The Docker image has skills in /app/skills/. Since we mount the volume over it,
+# we need to seed the volume with the bundled skills on first creation.
+echo "  Seeding skills volume from Docker image..."
 cd "$AGENTS_DIR"
 docker compose up -d --build "$CONTAINER_NAME"
+
+# Copy skills from a temporary container (before the volume mount overwrites them)
+if [[ -z "$(ls -A "$DATA_DIR/skills/" 2>/dev/null)" ]]; then
+  TEMP_CONTAINER="temp-skills-${AGENT_NAME}"
+  docker create --name "$TEMP_CONTAINER" "$(docker compose images "$CONTAINER_NAME" -q)" >/dev/null 2>&1
+  docker cp "$TEMP_CONTAINER":/app/skills/. "$DATA_DIR/skills/" 2>/dev/null || true
+  docker rm "$TEMP_CONTAINER" >/dev/null 2>&1
+  chown -R 1000:1000 "$DATA_DIR/skills/"
+  echo "  Seeded $(ls "$DATA_DIR/skills/" | wc -l) skills from Docker image"
+  # Restart to pick up the seeded skills
+  docker compose restart "$CONTAINER_NAME"
+fi
+
 systemctl reload caddy
 
 # --- Wait for OpenClaw to initialize workspace, then append AGENTS addendum ---
