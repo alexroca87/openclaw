@@ -33,9 +33,16 @@ if [ -f "/data/gog-bin" ]; then
   cp /data/gog-bin /usr/local/bin/gog
   chmod +x /usr/local/bin/gog
 fi
+# Restore config for root (used by docker exec)
 if [ -d "/data/.gogcli-config" ]; then
   mkdir -p /root/.config/gogcli
   cp -r /data/.gogcli-config/* /root/.config/gogcli/
+fi
+# Restore config for node user (used by the agent process)
+if [ -d "/data/.gogcli-config-node" ]; then
+  mkdir -p /home/node/.config/gogcli
+  cp -r /data/.gogcli-config-node/* /home/node/.config/gogcli/
+  chown -R node:node /home/node/.config/gogcli
 fi
 
 # --- Install gogcli (Google Workspace CLI) ---
