@@ -12,7 +12,9 @@
 # installed by the agent (or this script) survive container recreations.
 #
 # What gets auto-installed:
-#   npm:     gog (Google), summarize (URLs/YouTube)
+#   gogcli:  Google Workspace CLI (Gmail, Calendar, Drive, etc.)
+#            Binary from github.com/steipete/gogcli (NOT the npm "gog" package)
+#   npm:     summarize (URLs/YouTube)
 #   ClawHub: ddg-web-search (DuckDuckGo), pdf-text-extractor (PDF OCR)
 #   Built-in (no install needed): weather, healthcheck, skill-creator,
 #            openai-whisper-api, openai-image-gen (need OPENAI_API_KEY)
@@ -26,8 +28,42 @@ chown -R node:node "$PERSISTENT_NPM"
 # --- Ensure /app/skills/ is owned by node (mounted volume may be root) ---
 chown -R node:node /app/skills 2>/dev/null || true
 
+# --- Restore gogcli binary + config from persistent volume (survives rebuilds) ---
+if [ -f "/data/gog-bin" ]; then
+  cp /data/gog-bin /usr/local/bin/gog
+  chmod +x /usr/local/bin/gog
+fi
+if [ -d "/data/.gogcli-config" ]; then
+  mkdir -p /root/.config/gogcli
+  cp -r /data/.gogcli-config/* /root/.config/gogcli/
+fi
+
+# --- Install gogcli (Google Workspace CLI) ---
+# IMPORTANT: Do NOT use "npm install -g gog" — that installs a wrong package
+# (a bash script runner, v0.0.12). The real Google CLI is "gogcli" from
+# github.com/steipete/gogcli, a Go binary.
+#
+# The binary is restored from /data/gog-bin above (persistent volume).
+# If not present there either, download it from GitHub releases.
+GOG_VERSION="v0.11.0"
+if ! command -v gog >/dev/null 2>&1; then
+  ARCH=$(uname -m)
+  case "$ARCH" in
+    x86_64)  GOG_ARCH="linux_amd64" ;;
+    aarch64) GOG_ARCH="linux_arm64" ;;
+    *)       GOG_ARCH="" ;;
+  esac
+  if [ -n "$GOG_ARCH" ]; then
+    GOG_URL="https://github.com/steipete/gogcli/releases/download/${GOG_VERSION}/gog_${GOG_ARCH}"
+    curl -fsSL "$GOG_URL" -o /usr/local/bin/gog >/dev/null 2>&1 && chmod +x /usr/local/bin/gog || true
+    # Save to persistent volume so we don't re-download next time
+    if [ -f /usr/local/bin/gog ]; then
+      cp /usr/local/bin/gog /data/gog-bin 2>/dev/null || true
+    fi
+  fi
+fi
+
 # --- Install npm CLI tools (as root, to system path) ---
-command -v gog       >/dev/null 2>&1 || npm install -g gog       >/dev/null 2>&1 || true
 command -v summarize >/dev/null 2>&1 || npm install -g summarize >/dev/null 2>&1 || true
 
 # --- Install ClawHub skills (to /app/skills/, persistent on volume) ---
