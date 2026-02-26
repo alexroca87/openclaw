@@ -18,7 +18,7 @@
 
 ## Quiet hours
 
-- Do NOT notify between 23:00 - 08:00 (__TIMEZONE__) unless urgent
+- Do NOT notify between __QUIET_START__ - __QUIET_END__ (__TIMEZONE__) unless urgent
 - If owner is clearly busy, batch updates for later
 
 ## Personalization (fill during onboarding)

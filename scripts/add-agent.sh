@@ -2,15 +2,18 @@
 # ---------------------------------------------------------------
 # add-agent.sh — Add a new OpenClaw agent to Hetzner VPS
 #
-# Usage: ./add-agent.sh <agent-name> <domain> <openrouter-api-key> [openai-api-key] [anthropic-api-key]
-# Example: ./add-agent.sh agentalfa agentik.mx sk-or-v1-abc123... sk-proj-xyz... sk-ant-api03-...
+# Usage: ./add-agent.sh <agent-name> <domain> [openrouter-api-key] [openai-api-key] [anthropic-api-key]
+# Example: ./add-agent.sh maria agentik.mx "" "" sk-ant-api03-...
+#
+# At least one of openrouter-api-key or anthropic-api-key must be provided.
+# Pass "" for keys you don't have.
 #
 # What it does:
 #   1. Generates a gateway token
 #   2. Creates data directories with correct permissions
 #   3. Writes openclaw.json (allowedOrigins, auth token)
 #   4. Writes auth-profiles.json (AuthProfileStore format)
-#   5. Sets default model to anthropic/claude-haiku-4-5
+#   5. Sets default model based on available keys
 #   6. Copies entrypoint.sh (auto-installs CLI tools on start)
 #   7. Adds service to docker-compose.yml (with workspace mount)
 #   8. Adds Caddy reverse proxy entry
@@ -19,21 +22,29 @@
 
 set -euo pipefail
 
-if [[ $# -lt 3 ]]; then
-  echo "Usage: $0 <agent-name> <domain> <openrouter-api-key> [openai-api-key] [anthropic-api-key]"
-  echo "Example: $0 agentalfa agentik.mx sk-or-v1-abc123... sk-proj-xyz... sk-ant-api03-..."
+if [[ $# -lt 2 ]]; then
+  echo "Usage: $0 <agent-name> <domain> [openrouter-api-key] [openai-api-key] [anthropic-api-key]"
+  echo "Example: $0 maria agentik.mx \"\" \"\" sk-ant-api03-..."
   echo ""
-  echo "  openrouter-api-key  — Required. Used for chat models via OpenRouter."
+  echo "  openrouter-api-key  — Optional. Used for chat models via OpenRouter."
   echo "  openai-api-key      — Optional. Used for Whisper transcription + embeddings."
   echo "  anthropic-api-key   — Optional. Used for direct Anthropic model access."
+  echo ""
+  echo "  At least one of openrouter-api-key or anthropic-api-key must be provided."
   exit 1
 fi
 
 AGENT_NAME="$1"
 DOMAIN="$2"
-OPENROUTER_KEY="$3"
+OPENROUTER_KEY="${3:-}"
 OPENAI_KEY="${4:-}"
 ANTHROPIC_KEY="${5:-}"
+
+# --- Validate at least one LLM key ---
+if [[ -z "$OPENROUTER_KEY" && -z "$ANTHROPIC_KEY" ]]; then
+  echo "ERROR: At least one of openrouter-api-key or anthropic-api-key must be provided."
+  exit 1
+fi
 AGENTS_DIR="/opt/agents"
 COMPOSE_FILE="$AGENTS_DIR/docker-compose.yml"
 CADDYFILE="/etc/caddy/Caddyfile"
@@ -76,16 +87,14 @@ mkdir -p "$WORKSPACE_DIR/memory"
 mkdir -p "$WORKSPACE_DIR/uploads"
 mkdir -p "$DATA_DIR/skills"
 
-# --- Copy workspace templates (TOOLS.md, HEARTBEAT.md, AGENTS addendum) ---
+# --- Copy workspace templates (TOOLS.md, HEARTBEAT.md, USER.md, AGENTS addendum) ---
 TEMPLATES_DIR="/opt/openclaw/scripts/workspace-templates"
-if [[ -f "$TEMPLATES_DIR/TOOLS.md" ]]; then
-  cp "$TEMPLATES_DIR/TOOLS.md" "$WORKSPACE_DIR/TOOLS.md"
-  echo "  Copied TOOLS.md template to workspace"
-fi
-if [[ -f "$TEMPLATES_DIR/HEARTBEAT.md" ]]; then
-  cp "$TEMPLATES_DIR/HEARTBEAT.md" "$WORKSPACE_DIR/HEARTBEAT.md"
-  echo "  Copied HEARTBEAT.md template to workspace"
-fi
+for TMPL in TOOLS.md HEARTBEAT.md USER.md; do
+  if [[ -f "$TEMPLATES_DIR/$TMPL" ]]; then
+    cp "$TEMPLATES_DIR/$TMPL" "$WORKSPACE_DIR/$TMPL"
+    echo "  Copied $TMPL template to workspace"
+  fi
+done
 
 # --- Determine default model ---
 if [[ -n "$ANTHROPIC_KEY" ]]; then
@@ -133,16 +142,21 @@ OCEOF
 # Build profiles object based on which keys are provided
 PROFILES=""
 
-# OpenRouter profile (always present)
-PROFILES="\"openrouter-default\": {
+# OpenRouter profile (optional)
+if [[ -n "$OPENROUTER_KEY" ]]; then
+  PROFILES="\"openrouter-default\": {
       \"type\": \"api_key\",
       \"provider\": \"openrouter\",
       \"key\": \"${OPENROUTER_KEY}\"
     }"
+fi
 
 # Anthropic profile (optional)
 if [[ -n "$ANTHROPIC_KEY" ]]; then
-  PROFILES="${PROFILES},
+  if [[ -n "$PROFILES" ]]; then
+    PROFILES="${PROFILES},"
+  fi
+  PROFILES="${PROFILES}
     \"anthropic-default\": {
       \"type\": \"api_key\",
       \"provider\": \"anthropic\",
@@ -159,8 +173,9 @@ cat > "$AGENT_DIR/auth-profiles.json" << APEOF
 }
 APEOF
 
-# --- Write models.json ---
-cat > "$AGENT_DIR/models.json" << MDEOF
+# --- Write models.json (only if OpenRouter key is provided) ---
+if [[ -n "$OPENROUTER_KEY" ]]; then
+  cat > "$AGENT_DIR/models.json" << MDEOF
 {
   "providers": {
     "openrouter": {
@@ -182,6 +197,7 @@ cat > "$AGENT_DIR/models.json" << MDEOF
   }
 }
 MDEOF
+fi
 
 # --- Ensure entrypoint script exists ---
 if [[ ! -f "$AGENTS_DIR/entrypoint.sh" ]]; then
@@ -196,8 +212,12 @@ chmod +x "$AGENTS_DIR/entrypoint.sh"
 
 # --- Build environment variables block ---
 ENV_BLOCK="      - OPENCLAW_STATE_DIR=/data/.openclaw
-      - OPENCLAW_WORKSPACE_DIR=/data/workspace
+      - OPENCLAW_WORKSPACE_DIR=/data/workspace"
+
+if [[ -n "$OPENROUTER_KEY" ]]; then
+  ENV_BLOCK="${ENV_BLOCK}
       - OPENROUTER_API_KEY=${OPENROUTER_KEY}"
+fi
 
 if [[ -n "$OPENAI_KEY" ]]; then
   ENV_BLOCK="${ENV_BLOCK}

@@ -1,14 +1,32 @@
 #!/usr/bin/env node
 import http from 'http'
 import { spawn } from 'child_process'
-import { readFileSync } from 'fs'
+import { readFileSync, writeFileSync, existsSync, copyFileSync } from 'fs'
+import crypto from 'crypto'
 
 const PORT = 4000
 const TOKEN = process.env.PROVISION_API_TOKEN
+const AGENTS_DIR = '/opt/agents'
 
 if (!TOKEN) {
   console.error('ERROR: PROVISION_API_TOKEN env var is required')
   process.exit(1)
+}
+
+// --- Helper: replace placeholders in a file on the host ---
+function fillTemplate(filePath, replacements) {
+  if (!existsSync(filePath)) return false
+  let content = readFileSync(filePath, 'utf8')
+  for (const [placeholder, value] of Object.entries(replacements)) {
+    content = content.replaceAll(placeholder, value)
+  }
+  writeFileSync(filePath, content, 'utf8')
+  return true
+}
+
+// --- Helper: generate a random setup password ---
+function generateSetupPassword() {
+  return crypto.randomBytes(12).toString('base64url')
 }
 
 const server = http.createServer(async (req, res) => {
@@ -22,7 +40,7 @@ const server = http.createServer(async (req, res) => {
   if (allowed.includes(origin) || origin.endsWith('.vercel.app')) {
     res.setHeader('Access-Control-Allow-Origin', origin)
   }
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS')
+  res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS')
   res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type')
 
   if (req.method === 'OPTIONS') {
@@ -31,9 +49,9 @@ const server = http.createServer(async (req, res) => {
     return
   }
 
-  // Auth
+  // Auth (skip for health check GET)
   const auth = req.headers['authorization'] || ''
-  if (auth !== `Bearer ${TOKEN}`) {
+  if (req.url !== '/health' && auth !== `Bearer ${TOKEN}`) {
     res.writeHead(401, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ error: 'Unauthorized' }))
     return
@@ -46,27 +64,39 @@ const server = http.createServer(async (req, res) => {
     return
   }
 
-  // Provision endpoint
+  // =====================================================================
+  // POST /provision — Create a new agent with onboarding data
+  // =====================================================================
   if (req.method === 'POST' && req.url === '/provision') {
     let body = ''
     req.on('data', chunk => body += chunk)
     req.on('end', () => {
-      let agentName, openrouterKey, telegramToken
+      let agentName, domain, apiKey, openrouterKey, openaiKey, telegramBotToken, onboarding
 
       try {
         const parsed = JSON.parse(body)
         agentName = parsed.agentName?.trim()
-        openrouterKey = parsed.openrouterKey?.trim()
-        telegramToken = parsed.telegramToken?.trim() || null
+        domain = parsed.domain?.trim() || 'agentik.mx'
+        apiKey = parsed.apiKey?.trim() || ''           // Anthropic key
+        openrouterKey = parsed.openrouterKey?.trim() || ''
+        openaiKey = parsed.openaiKey?.trim() || ''
+        telegramBotToken = parsed.telegramBotToken?.trim() || null
+        onboarding = parsed.onboarding || null
       } catch {
         res.writeHead(400, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ error: 'Invalid JSON' }))
         return
       }
 
-      if (!agentName || !openrouterKey) {
+      if (!agentName) {
         res.writeHead(400, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'agentName and openrouterKey are required' }))
+        res.end(JSON.stringify({ error: 'agentName is required' }))
+        return
+      }
+
+      if (!apiKey && !openrouterKey) {
+        res.writeHead(400, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'At least one of apiKey (Anthropic) or openrouterKey is required' }))
         return
       }
 
@@ -76,6 +106,9 @@ const server = http.createServer(async (req, res) => {
         res.end(JSON.stringify({ error: 'agentName must be lowercase letters, numbers, and hyphens only' }))
         return
       }
+
+      // Generate a setup password for initial web UI access
+      const setupPassword = generateSetupPassword()
 
       // Set SSE headers
       res.writeHead(200, {
@@ -88,16 +121,19 @@ const server = http.createServer(async (req, res) => {
         res.write(`data: ${JSON.stringify({ type, data })}\n\n`)
       }
 
-      // Run add-agent.sh
-      send('log', `🚀 Iniciando aprovisionamiento de agente: ${agentName}`)
+      // Run add-agent.sh with: <name> <domain> [openrouter] [openai] [anthropic]
+      send('log', `Iniciando aprovisionamiento de agente: ${agentName}`)
       send('log', '─────────────────────────────────────────')
 
-      const addAgent = spawn('/opt/agents/add-agent.sh', [agentName, 'agentik.mx', openrouterKey], {
+      const addAgent = spawn('/opt/agents/add-agent.sh', [
+        agentName, domain, openrouterKey, openaiKey, apiKey
+      ], {
         cwd: '/opt/agents',
       })
 
       let gatewayToken = null
       const containerName = `agent-${agentName}`
+      const workspaceDir = `${AGENTS_DIR}/data/${agentName}/workspace`
 
       addAgent.stdout.on('data', data => {
         const lines = data.toString().split('\n').filter(Boolean)
@@ -114,7 +150,7 @@ const server = http.createServer(async (req, res) => {
         for (const line of lines) {
           // Skip Docker build noise (layer downloads)
           if (line.startsWith('#') || line.includes(' => ') || line.includes('CACHED')) continue
-          send('log', `⚠️  ${line}`)
+          send('log', `  ${line}`)
         }
       })
 
@@ -130,9 +166,68 @@ const server = http.createServer(async (req, res) => {
           return
         }
 
-        // Post-setup: install gog + summarize (they're lost on container recreate)
+        // --- Post-setup step 1: Fill workspace templates with onboarding data ---
+        if (onboarding) {
+          send('log', '')
+          send('log', 'Personalizando workspace con datos de onboarding...')
+
+          const checks = Array.isArray(onboarding.periodicChecks)
+            ? onboarding.periodicChecks
+            : []
+          const helpTasks = Array.isArray(onboarding.helpTasks)
+            ? onboarding.helpTasks
+            : []
+
+          // Fill HEARTBEAT.md placeholders
+          const heartbeatFilled = fillTemplate(`${workspaceDir}/HEARTBEAT.md`, {
+            '__OWNER_NAME__': onboarding.ownerName || agentName,
+            '__TIMEZONE__': onboarding.timezone || 'UTC',
+            '__PRIMARY_CHANNEL__': onboarding.agentChannel || 'web',
+            '__YES_NO__': checks.length > 0 ? 'Yes' : 'No',
+            '__CUSTOM_CHECKS__': checks.join(', ') || 'None configured',
+            '__QUIET_START__': onboarding.quietStart || '23:00',
+            '__QUIET_END__': onboarding.quietEnd || '08:00',
+          })
+          if (heartbeatFilled) send('log', '  HEARTBEAT.md personalizado')
+
+          // Fill USER.md placeholders
+          const userFilled = fillTemplate(`${workspaceDir}/USER.md`, {
+            '__OWNER_NAME__': onboarding.ownerName || agentName,
+            '__NICKNAME__': onboarding.nickname || onboarding.ownerName || agentName,
+            '__OCCUPATION__': onboarding.occupation || 'Not specified',
+            '__LANGUAGE__': onboarding.language || 'English',
+            '__TONE__': onboarding.tone || 'Professional',
+            '__PRIMARY_CHANNEL__': onboarding.agentChannel || 'web',
+            '__TIMEZONE__': onboarding.timezone || 'UTC',
+            '__QUIET_START__': onboarding.quietStart || '23:00',
+            '__QUIET_END__': onboarding.quietEnd || '08:00',
+            '__ABOUT_ME__': onboarding.aboutMe || 'Not provided yet.',
+            '__GOALS__': onboarding.goals || 'Not provided yet.',
+            '__HELP_TASKS__': helpTasks.length > 0
+              ? helpTasks.map(t => `- ${t}`).join('\n')
+              : '- General assistance',
+          })
+          if (userFilled) send('log', '  USER.md personalizado')
+
+          // Fill TOOLS.md Telegram placeholders if bot token is provided
+          if (telegramBotToken) {
+            fillTemplate(`${workspaceDir}/TOOLS.md`, {
+              '__TELEGRAM_BOT__': `(configured)`,
+              '__TELEGRAM_CHAT_ID__': '(pending first message)',
+            })
+          }
+        }
+
+        // --- Post-setup step 2: Copy USER.md template if onboarding didn't create it ---
+        if (!onboarding && existsSync('/opt/openclaw/scripts/workspace-templates/USER.md')) {
+          try {
+            copyFileSync('/opt/openclaw/scripts/workspace-templates/USER.md', `${workspaceDir}/USER.md`)
+          } catch { /* template will have placeholders */ }
+        }
+
+        // --- Post-setup step 3: Install CLI tools ---
         send('log', '')
-        send('log', '📦 Instalando herramientas CLI (gog, summarize)...')
+        send('log', 'Instalando herramientas CLI (gog, summarize)...')
 
         const npmInstall = spawn('docker', [
           'exec', '-u', 'root', containerName,
@@ -144,7 +239,6 @@ const server = http.createServer(async (req, res) => {
           for (const l of lines) send('log', `  ${l}`)
         })
         npmInstall.stderr.on('data', d => {
-          // npm install writes progress to stderr — filter noise
           const lines = d.toString().split('\n').filter(Boolean)
           for (const l of lines) {
             if (l.includes('npm warn') || l.includes('added ')) send('log', `  ${l}`)
@@ -152,9 +246,9 @@ const server = http.createServer(async (req, res) => {
         })
 
         npmInstall.on('close', () => {
-          // Post-setup: memory directory
+          // --- Post-setup step 4: Memory directory ---
           send('log', '')
-          send('log', '🧠 Configurando directorio de memoria...')
+          send('log', 'Configurando directorio de memoria...')
 
           const memSetup = spawn('docker', [
             'exec', '-u', 'root', containerName,
@@ -163,21 +257,20 @@ const server = http.createServer(async (req, res) => {
           ])
 
           memSetup.on('close', () => {
-            // Set Telegram bot token if provided
-            if (telegramToken) {
+            // --- Post-setup step 5: Telegram ---
+            if (telegramBotToken) {
               send('log', '')
-              send('log', '🤖 Configurando Telegram...')
+              send('log', 'Configurando Telegram...')
 
               const tgSetup = spawn('docker', [
                 'exec', containerName,
                 'node', '/app/openclaw.mjs', 'config', 'set',
-                'channels.telegram.accounts.default.botToken', telegramToken
+                'channels.telegram.accounts.default.botToken', telegramBotToken
               ])
 
               tgSetup.on('close', () => {
-                // Restart container to apply Telegram config
                 spawn('docker', ['compose', '-f', '/opt/agents/docker-compose.yml', 'restart', containerName])
-                send('log', '  ✅ Telegram configurado — reiniciando container...')
+                send('log', '  Telegram configurado — reiniciando container...')
                 finalize()
               })
             } else {
@@ -187,14 +280,18 @@ const server = http.createServer(async (req, res) => {
         })
 
         function finalize() {
+          const agentUrl = `https://${agentName}.${domain}`
+
           send('log', '')
-          send('log', '✅ ¡Agente listo!')
-          send('log', `   URL: https://${agentName}.agentik.mx`)
+          send('log', 'Agente listo!')
+          send('log', `   URL: ${agentUrl}`)
           send('log', `   Gateway Token: ${gatewayToken}`)
           send('done', {
-            agentUrl: `https://${agentName}.agentik.mx`,
+            ok: true,
+            agentUrl,
             gatewayToken,
             containerName,
+            setupPassword,
           })
           res.end()
         }
@@ -204,7 +301,9 @@ const server = http.createServer(async (req, res) => {
   }
 
 
-  // File ingest endpoint — write file content to agent workspace
+  // =====================================================================
+  // POST /file-ingest — Write file content to agent workspace
+  // =====================================================================
   if (req.method === 'POST' && req.url === '/file-ingest') {
     let body = ''
     req.on('data', chunk => body += chunk)
@@ -232,7 +331,6 @@ const server = http.createServer(async (req, res) => {
       const safeName = filename.replace(/[^a-zA-Z0-9._-]/g, '_')
       const containerName = 'agent-' + agentName
 
-      const { spawn } = await import('child_process')
       const mkdir = spawn('docker', [
         'exec', '-u', 'root', containerName,
         'sh', '-c', 'mkdir -p /home/node/.openclaw/workspace/uploads'
@@ -262,8 +360,7 @@ const server = http.createServer(async (req, res) => {
 
           // Wake the agent immediately with a system event
           try {
-            // readFileSync already imported at top
-            const cfgPath = '/opt/agents/data/' + agentName + '/.openclaw/openclaw.json'
+            const cfgPath = `${AGENTS_DIR}/data/${agentName}/.openclaw/openclaw.json`
             const cfg = JSON.parse(readFileSync(cfgPath, 'utf8'))
             const internalToken = cfg?.gateway?.auth?.token || ''
             if (internalToken) {
@@ -295,4 +392,3 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`Provision API listening on port ${PORT}`)
 })
-
